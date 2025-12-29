@@ -196,5 +196,3 @@ export CHECK_INTERVAL=15
 ```bash
 tail -f /opt/folder-monitor/power_monitor.log
 ```
-
-test
