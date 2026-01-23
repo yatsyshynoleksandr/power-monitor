@@ -95,7 +95,7 @@ def setup_logging():
 class StatsCollector:
     """Collects duration statistics and state change counts."""
     
-    def __init__(self, start_date: Optional[datetime] = None):
+    def __init__(self, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None):
         self.durations = {
             "POWER_ON": 0.0, "POWER_OFF": 0.0,
             "NET_ONLINE": 0.0, "NET_OFFLINE": 0.0
@@ -105,6 +105,7 @@ class StatsCollector:
             "NET_ONLINE": 0, "NET_OFFLINE": 0
         }
         self.start_date = start_date or datetime.now()
+        self.end_date = end_date  # Set when stats period ends (for reports)
 
     def update_power(self, p_state: PowerState, seconds: float):
         """Update power state duration."""
@@ -118,11 +119,17 @@ class StatsCollector:
         self.counts[state_val] += 1
 
     def to_dict(self) -> dict:
-        return {"durations": self.durations, "counts": self.counts, "start_date": self.start_date.isoformat()}
+        return {
+            "durations": self.durations,
+            "counts": self.counts,
+            "start_date": self.start_date.isoformat(),
+            "end_date": self.end_date.isoformat() if self.end_date else None
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "StatsCollector":
-        coll = cls(start_date=datetime.fromisoformat(data["start_date"]))
+        end_date = datetime.fromisoformat(data["end_date"]) if data.get("end_date") else None
+        coll = cls(start_date=datetime.fromisoformat(data["start_date"]), end_date=end_date)
         coll.durations = data["durations"]
         coll.counts = data["counts"]
         return coll
@@ -224,12 +231,14 @@ class StatsManager:
 
     def prepare_daily_report(self):
         """Save current daily stats for report and reset (called at midnight)."""
+        self.daily.end_date = datetime.now()  # Mark end of stats period
         self.pending_daily_report = self.daily
         self.daily = StatsCollector()
         self.last_daily_reset_day = datetime.now().date()
 
     def prepare_weekly_report(self):
         """Save current weekly stats for report and reset (called at Monday midnight)."""
+        self.weekly.end_date = datetime.now()  # Mark end of stats period
         self.pending_weekly_report = self.weekly
         self.weekly = StatsCollector()
         self.last_weekly_reset_week = datetime.now().isocalendar()[1]
@@ -320,7 +329,9 @@ def normalize_durations(dur_a: float, dur_b: float, expected_total: float) -> tu
 def create_report(title: str, stats: StatsCollector) -> str:
     """Generate statistics report text for Telegram."""
     # Calculate expected duration based on actual elapsed time
-    elapsed = (datetime.now() - stats.start_date).total_seconds()
+    # Use end_date if available (for pending reports), otherwise current time
+    end_time = stats.end_date or datetime.now()
+    elapsed = (end_time - stats.start_date).total_seconds()
     
     # Normalize durations to match elapsed time exactly
     p_on, p_off = normalize_durations(
@@ -349,12 +360,12 @@ def create_report(title: str, stats: StatsCollector) -> str:
     
     return (
         f"📊 *{title}*\n"
-        f"📅 {stats.start_date.strftime('%d.%m')} — {datetime.now().strftime('%d.%m')}\n\n"
-        f"💡 *Світло:* {format_duration(p_on)} ({pct_on:.1f}%)\n"
-        f"🔌 *Без світла:* {format_duration(p_off)} ({pct_off:.1f}%)\n"
-        f"📈 Увімкнень: {stats.counts['POWER_ON']}\n\n"
-        f"🌐 *Інтернет:* {format_duration(i_on)} ({pct_i_on:.1f}%)\n"
-        f"☁️ *Без інтернету:* {format_duration(i_off)} ({pct_i_off:.1f}%)\n"
+        f"📅 {stats.start_date.strftime('%d.%m')} — {end_time.strftime('%d.%m')}\n\n"
+        f"💡 *Світло було:* {format_duration(p_on)} ({pct_on:.1f}%)\n"
+        f"🔌 *Світла не було:* {format_duration(p_off)} ({pct_off:.1f}%)\n"
+        f"📈 Вимкнень світла: {stats.counts['POWER_OFF']}\n\n"
+        f"🌐 *Інтернет був:* {format_duration(i_on)} ({pct_i_on:.1f}%)\n"
+        f"☁️ *Інтернету не було:* {format_duration(i_off)} ({pct_i_off:.1f}%)\n"
     )
 
 async def main():
@@ -452,7 +463,7 @@ async def main():
                         if cur_p:
                             # Power ON = was OFF before, Power OFF = was ON before
                             dur_label = "Світла не було" if new_p == PowerState.ON else "Світло було"
-                            msg += f"\n⏱ {dur_label}: {format_duration(dur_seconds)}"
+                            msg += f"\n\n⏱ {dur_label}: {format_duration(dur_seconds)}"
                         await send_msg(bot, msg)
                         logging.info(f"Power state changed: {cur_p} -> {new_p}")
                         
@@ -475,11 +486,11 @@ async def main():
                         p_label = "є" if cur_p == PowerState.ON else "немає"
                         msg = STATE_MESSAGES[new_i].format(p_label)
                         if cur_i:
-                            msg += f"\n⏱ Інтернет був: {format_duration(dur_seconds)}"
+                            msg += f"\n\n⏱ Інтернет був: {format_duration(dur_seconds)}"
                     else:
                         msg = STATE_MESSAGES[new_i]
                         if cur_i:
-                            msg += f"\n⏱ Інтернету не було: {format_duration(dur_seconds)}"
+                            msg += f"\n\n⏱ Інтернету не було: {format_duration(dur_seconds)}"
                     
                     await send_msg(bot, msg)
                     logging.info(f"Internet state changed: {cur_i} -> {new_i}")
