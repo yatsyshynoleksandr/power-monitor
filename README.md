@@ -80,6 +80,63 @@ export ROUTER_2_PORT="1234"
 python power_monitor.py
 ```
 
+### В Docker (з даними на хості)
+
+Щоб `LOG_FILE` і `STATS_FILE` зберігались між перезапусками контейнера,
+примонтуйте директорію з хоста в `/opt/folder-monitor`.
+
+Це важливо для повного функціоналу:
+- ротація логу створює файли `power_monitor.log.1`, `power_monitor.log.2`, ...
+- статистика зберігається атомарно через тимчасовий файл `*.tmp` і `replace()`
+
+1. Підготуйте директорію на хості:
+
+```bash
+mkdir -p ./data
+```
+
+2. Зберіть образ:
+
+```bash
+docker build -t power-monitor .
+```
+
+3. Запустіть контейнер:
+
+```bash
+docker run -d --name power-monitor \
+	-e TELEGRAM_BOT_TOKEN="your-bot-token" \
+	-e TELEGRAM_CHAT_ID="@your-telegram-chat-id" \
+	-e ROUTER_IP="1.2.3.4" \
+	-e ROUTER_2_PORT="1234" \
+	-v "$(pwd)/data:/opt/folder-monitor" \
+	power-monitor
+```
+
+У такому випадку змінні `LOG_FILE` і `STATS_FILE` можна не задавати:
+скрипт використає дефолтні шляхи `/opt/folder-monitor/...`, які вже вказують
+на змонтовану директорію хоста.
+
+Примітка: `REPORT_HOUR` працює у часовому поясі контейнера (часто UTC на EC2).
+Якщо потрібен локальний час, налаштуйте timezone контейнера окремо.
+
+#### Docker Compose (опційно)
+
+```yaml
+services:
+	power-monitor:
+		build: .
+		container_name: power-monitor
+		restart: always
+		environment:
+			TELEGRAM_BOT_TOKEN: your-bot-token
+			TELEGRAM_CHAT_ID: "@your-telegram-chat-id"
+			ROUTER_IP: 1.2.3.4
+			ROUTER_2_PORT: "1234"
+		volumes:
+			- ./data:/opt/folder-monitor
+```
+
 ### Через systemd
 
 Створіть файл `/etc/systemd/system/power-monitor.service`:
