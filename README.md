@@ -67,6 +67,32 @@ pip install python-telegram-bot
 | `STATS_FILE` | Шлях до файлу статистики | `/opt/folder-monitor/power_monitor_stats.json` |
 | `TELEGRAM_RETRIES` | К-сть спроб надсилання | `3` |
 | `STATS_SAVE_INTERVAL` | Зберігати статистику кожні N ітерацій | `6` |
+| `MANGO_WEBHOOK_URL` | URL вебхука Mango Home (не задано = вимкнено) | — |
+| `MANGO_WEBHOOK_TOKEN` | Спільний секрет для вебхука (заголовок `X-Report-Token`) | — |
+| `MANGO_WEBHOOK_TIMEOUT` | Таймаут запиту до вебхука (сек) | `5` |
+
+## Інтеграція з Mango Home (опційно)
+
+Якщо задано `MANGO_WEBHOOK_URL`, скрипт надсилає поточний стан на дашборд
+[Mango Home](https://mango-home.net) (`POST /api/power-status/report`):
+
+- при кожній зміні стану світла чи інтернету;
+- heartbeat раз на ~хвилину (кожні `STATS_SAVE_INTERVAL` ітерацій);
+- одразу при старті (останній відомий стан).
+
+Аутентифікація — спільний секрет у заголовку `X-Report-Token` (`MANGO_WEBHOOK_TOKEN`,
+має збігатися з `POWER_REPORT_TOKEN` на боці Mango Home). Надсилання best-effort:
+помилка вебхука лише пише warning у лог і не впливає на моніторинг чи Telegram.
+Дашборд вважає дані застарілими, якщо heartbeat відсутній понад 3 хвилини.
+
+```json
+{
+  "power_state": "POWER_ON | POWER_OFF | null",
+  "internet_state": "NET_ONLINE | NET_OFFLINE | null",
+  "last_power_change": "ISO datetime | null",
+  "last_internet_change": "ISO datetime | null"
+}
+```
 
 ## Запуск
 

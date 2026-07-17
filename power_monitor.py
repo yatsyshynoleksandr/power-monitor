@@ -31,6 +31,8 @@ from typing import Optional
 from datetime import datetime
 from pathlib import Path
 
+# httpx ships as a python-telegram-bot dependency — no extra requirement needed.
+import httpx
 from telegram import Bot
 
 # ================= CONFIG =================
@@ -56,6 +58,13 @@ TELEGRAM_RETRIES = int(os.environ.get("TELEGRAM_RETRIES", "3"))
 REPORT_HOUR = int(os.environ.get("REPORT_HOUR", "7"))
 STATS_FILE = os.environ.get("STATS_FILE", "/opt/folder-monitor/power_monitor_stats.json")
 STATS_SAVE_INTERVAL = int(os.environ.get("STATS_SAVE_INTERVAL", "6"))  # Save every N iterations (~1 min)
+
+# Optional: push current state to the Mango Home dashboard. Unset = feature off.
+# Pushes fire on every state change plus a heartbeat on the stats-save cadence
+# (~1 min), so the dashboard can treat a silent gap as "monitor down".
+MANGO_WEBHOOK_URL = os.environ.get("MANGO_WEBHOOK_URL")
+MANGO_WEBHOOK_TOKEN = os.environ.get("MANGO_WEBHOOK_TOKEN")
+MANGO_WEBHOOK_TIMEOUT = int(os.environ.get("MANGO_WEBHOOK_TIMEOUT", "5"))
 # ==========================================
 
 class PowerState(Enum):
@@ -318,6 +327,29 @@ async def send_msg(bot: Bot, text: str) -> bool:
     logging.error(f"Failed to send Telegram message after {TELEGRAM_RETRIES} attempts")
     return False
 
+async def push_status_to_mango(client: httpx.AsyncClient, stats_mgr: "StatsManager"):
+    """Best-effort push of the current state to the Mango Home dashboard.
+
+    Never raises: the dashboard is a passive consumer and a failed push must not
+    disturb monitoring or Telegram notifications.
+    """
+    payload = {
+        "power_state": stats_mgr.current_power_state,
+        "internet_state": stats_mgr.current_internet_state,
+        "last_power_change": stats_mgr.last_power_change.isoformat() if stats_mgr.last_power_change else None,
+        "last_internet_change": stats_mgr.last_internet_change.isoformat() if stats_mgr.last_internet_change else None,
+    }
+    try:
+        resp = await client.post(
+            MANGO_WEBHOOK_URL,
+            json=payload,
+            headers={"X-Report-Token": MANGO_WEBHOOK_TOKEN or ""},
+        )
+        if resp.status_code != 200:
+            logging.warning(f"Mango webhook returned {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logging.warning(f"Mango webhook push failed: {e}")
+
 def normalize_durations(dur_a: float, dur_b: float, expected_total: float) -> tuple[float, float]:
     """Normalize two durations to sum exactly to expected_total (e.g., 24h or 7d)."""
     actual_total = dur_a + dur_b
@@ -397,6 +429,12 @@ async def main():
         logging.info(f"Restored state: power={cur_p}, internet={cur_i}")
     await send_msg(bot, "🚀 *Моніторинг запущено*")
 
+    mango_client = httpx.AsyncClient(timeout=MANGO_WEBHOOK_TIMEOUT) if MANGO_WEBHOOK_URL else None
+    if mango_client:
+        # Push the restored (last known) state right away so the dashboard doesn't
+        # sit on "no data" until the first heartbeat.
+        await push_status_to_mango(mango_client, stats_mgr)
+
     iteration_count = 0
     
     while not shutdown_event.is_set():
@@ -472,6 +510,8 @@ async def main():
                         stats_mgr.current_power_state = new_p.value
                         stats_mgr.last_power_change = now_dt
                         stats_mgr.increment(new_p.value)
+                        if mango_client:
+                            await push_status_to_mango(mango_client, stats_mgr)
                 else: cand_p, count_p = None, 0
             
             # 3. Debounce for INTERNET
@@ -499,6 +539,8 @@ async def main():
                     stats_mgr.current_internet_state = new_i.value
                     stats_mgr.last_internet_change = now_dt
                     stats_mgr.increment(new_i.value)
+                    if mango_client:
+                        await push_status_to_mango(mango_client, stats_mgr)
             else: cand_i, count_i = None, 0
 
             # First initialization, if power was not present
@@ -518,6 +560,10 @@ async def main():
             if iteration_count >= STATS_SAVE_INTERVAL:
                 stats_mgr.save()
                 iteration_count = 0
+                # Heartbeat on the same cadence: keeps the dashboard's staleness
+                # check alive even when nothing changes for hours.
+                if mango_client:
+                    await push_status_to_mango(mango_client, stats_mgr)
 
         except Exception as e: logging.error(f"Loop error: {e}")
         
@@ -525,6 +571,8 @@ async def main():
         except asyncio.TimeoutError: pass
 
     stats_mgr.save()
+    if mango_client:
+        await mango_client.aclose()
     await send_msg(bot, "🛑 *Моніторинг зупинено*")
 
 if __name__ == "__main__":
