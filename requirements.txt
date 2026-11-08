@@ -1,1 +1,3 @@
 python-telegram-bot==22.8
+# IANA timezone database for zoneinfo (slim images have no system tzdata)
+tzdata==2026.1
