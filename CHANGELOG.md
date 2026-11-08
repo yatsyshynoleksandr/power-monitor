@@ -1,3 +1,10 @@
+### [v1.2.1](https://github.com/yatsyshynoleksandr/power-monitor/tree/v1.2.1) (2026-11-09)
+
+*Security :*
+
+- stop logging HTTP request URLs (httpx/httpcore INFO logs): the Telegram API URL contains the
+  bot token, which ended up in the log file and container logs. Rotate the token if logs were shared.
+
 ### [v1.2.0](https://github.com/yatsyshynoleksandr/power-monitor/tree/v1.2.0) (2026-11-09)
 
 *Fix :*

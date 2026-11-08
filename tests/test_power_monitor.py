@@ -1,5 +1,6 @@
 """Unit tests for time accounting and formatting. Run: python -m unittest discover -s tests"""
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -201,6 +202,23 @@ class Persistence(Base):
         self.assertEqual(m.last_power_change, datetime(2026, 11, 10, 1, 0, 8, tzinfo=UTC))
         self.assertEqual(m.last_tick, datetime(2026, 11, 10, 1, 30, 8, 228242, tzinfo=UTC))
         self.assertAlmostEqual(m.daily.durations["POWER_ON"], 3600)
+
+
+class Logging(unittest.TestCase):
+    def test_http_client_request_urls_are_not_logged(self):
+        with tempfile.TemporaryDirectory() as d:
+            pm.LOG_FILE = os.path.join(d, "pm.log")
+            root = logging.getLogger()
+            before = list(root.handlers)
+            try:
+                pm.setup_logging()
+                self.assertEqual(logging.getLogger("httpx").getEffectiveLevel(), logging.WARNING)
+                self.assertEqual(logging.getLogger("httpcore").getEffectiveLevel(), logging.WARNING)
+            finally:
+                for h in root.handlers[:]:
+                    if h not in before:
+                        root.removeHandler(h)
+                        h.close()
 
 
 class Formatting(unittest.TestCase):
