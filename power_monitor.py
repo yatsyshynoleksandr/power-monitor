@@ -468,6 +468,9 @@ def setup_logging():
     console = logging.StreamHandler()
     console.setFormatter(fmt)
     logger.addHandler(console)
+    # httpx/httpcore log every request URL at INFO - for Telegram that URL contains the bot token.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 async def check_connectivity() -> tuple:
