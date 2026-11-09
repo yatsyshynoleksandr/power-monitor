@@ -221,6 +221,28 @@ class Logging(unittest.TestCase):
                         h.close()
 
 
+class QuietHours(unittest.TestCase):
+    def test_wraps_midnight(self):
+        self.assertTrue(pm.is_quiet(kyiv(2026, 11, 10, 22, 0), "22-8"))
+        self.assertTrue(pm.is_quiet(kyiv(2026, 11, 10, 3, 0), "22-8"))
+        self.assertTrue(pm.is_quiet(kyiv(2026, 11, 10, 7, 59), "22-8"))
+        self.assertFalse(pm.is_quiet(kyiv(2026, 11, 10, 8, 0), "22-8"))
+        self.assertFalse(pm.is_quiet(kyiv(2026, 11, 10, 21, 59), "22-8"))
+        self.assertTrue(pm.is_quiet(kyiv(2026, 11, 10, 13, 0), "12-14"))
+        self.assertFalse(pm.is_quiet(kyiv(2026, 11, 10, 3, 0), ""))
+
+
+class PlanVsFact(Base):
+    def test_planned_line_in_daily_report(self):
+        start = kyiv(2026, 11, 10)
+        m = self.manager(start)
+        self.run_ticks(m, start, kyiv(2026, 11, 11, 0, 1), step=600)
+        p = [p for p in m.pending if p.kind == "daily"][0]
+        text = pm.create_report(p, planned=(450, 60))
+        self.assertIn("🔌 *Світла не було:* 0с (0.0%)\n🗓 За графіком без світла: 7г 30хв (+ можливо 1г)\n", text)
+        self.assertNotIn("🗓", pm.create_report(p))
+
+
 class Formatting(unittest.TestCase):
     def test_durations(self):
         self.assertEqual(pm.format_duration(0), "0с")

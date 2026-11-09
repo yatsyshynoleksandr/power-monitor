@@ -18,6 +18,9 @@ Features:
 - Reports are never lost: a report that was due while the monitor was down is sent on startup
 - Persistent statistics between restarts (downtime is credited to the last known state)
 - Graceful shutdown (SIGTERM/SIGINT), heartbeat file for container health checks
+- Optional DTEK outage schedule for one queue: one silently-updated message per date (dtek.py),
+  planned vs actual outage time in the daily report
+- Quiet hours: messages are delivered without sound (except the 09:00 report)
 
 Time handling: every timestamp is kept as an aware UTC datetime; the local timezone is used only
 to find day/week boundaries, the report time and for display.
@@ -39,6 +42,9 @@ from zoneinfo import ZoneInfo
 # httpx ships as a python-telegram-bot dependency — no extra requirement needed.
 import httpx
 from telegram import Bot
+from telegram.error import BadRequest
+
+from dtek import DtekWatcher, fmt_minutes, normalize_group
 
 
 # ================= CONFIG =================
@@ -74,6 +80,16 @@ HEARTBEAT_FILE = os.environ.get("HEARTBEAT_FILE", "/tmp/power_monitor.heartbeat"
 MANGO_WEBHOOK_URL = os.environ.get("MANGO_WEBHOOK_URL")
 MANGO_WEBHOOK_TOKEN = os.environ.get("MANGO_WEBHOOK_TOKEN")
 MANGO_WEBHOOK_TIMEOUT = int(os.environ.get("MANGO_WEBHOOK_TIMEOUT", "5"))
+
+# Quiet hours "22-8": messages are sent without sound (the 09:00 report always rings). "" = off.
+QUIET_HOURS = os.environ.get("QUIET_HOURS", "22-8")
+
+# Optional DTEK outage schedule. Empty DTEK_SOURCE_URL = feature off.
+DTEK_SOURCE_URL = os.environ.get("DTEK_SOURCE_URL", "")
+DTEK_GROUP = normalize_group(os.environ.get("DTEK_GROUP", "2.1"))
+DTEK_POLL_INTERVAL = int(os.environ.get("DTEK_POLL_INTERVAL", "300"))
+DTEK_STALE_HOURS = float(os.environ.get("DTEK_STALE_HOURS", "2"))
+DTEK_STATE_FILE = os.environ.get("DTEK_STATE_FILE", str(Path(STATS_FILE).with_name("dtek_state.json")))
 # ==========================================
 
 UTC = timezone.utc
@@ -127,6 +143,23 @@ def local_at(d: date, hour: int = 0) -> datetime:
 
 def week_monday(d: date) -> date:
     return d - timedelta(days=d.weekday())
+
+
+def parse_quiet_hours(value: str) -> Optional[tuple]:
+    try:
+        start, end = (int(x) for x in value.split("-"))
+        return start % 24, end % 24
+    except ValueError:
+        return None
+
+
+def is_quiet(now: datetime, spec: str = None) -> bool:
+    hours = parse_quiet_hours(QUIET_HOURS if spec is None else spec)
+    if not hours or hours[0] == hours[1]:
+        return False
+    start, end = hours
+    h = now.astimezone(TZ).hour
+    return start <= h < end if start < end else (h >= start or h < end)
 
 
 # ================= STATISTICS =================
@@ -402,8 +435,9 @@ def format_pct(value: float, total: float) -> str:
     return f"{pct:.1f}%"
 
 
-def create_report(p: Period) -> str:
-    """Generate statistics report text for Telegram."""
+def create_report(p: Period, planned: Optional[tuple] = None) -> str:
+    """Generate statistics report text for Telegram. `planned` = (off_minutes, maybe_minutes)
+    from the DTEK schedule for that day (daily reports only)."""
     d = p.report_durations()
     length = round(p.length)
     if p.kind == "daily":
@@ -420,11 +454,19 @@ def create_report(p: Period) -> str:
 
     p_on, p_off, p_total = pair("POWER_ON", "POWER_OFF")
     i_on, i_off, i_total = pair("NET_ONLINE", "NET_OFFLINE")
+    plan_line = ""
+    if planned is not None and p.kind == "daily":
+        off_min, maybe_min = planned
+        plan_line = f"🗓 За графіком без світла: {fmt_minutes(off_min)}"
+        if maybe_min:
+            plan_line += f" (+ можливо {fmt_minutes(maybe_min)})"
+        plan_line += "\n"
     return (
         f"📊 *{title}*\n"
         f"📅 {when}\n\n"
         f"💡 *Світло було:* {format_duration(p_on)} ({format_pct(p_on, p_total)})\n"
         f"🔌 *Світла не було:* {format_duration(p_off)} ({format_pct(p_off, p_total)})\n"
+        f"{plan_line}"
         f"📉 Вимкнень світла: {p.counts['POWER_OFF']}\n\n"
         f"📶 *Інтернет був:* {format_duration(i_on)} ({format_pct(i_on, i_total)})\n"
         f"📵 *Інтернету не було:* {format_duration(i_off)} ({format_pct(i_off, i_total)})\n"
@@ -512,18 +554,43 @@ def check_port(ip: str, port: int) -> bool:
         return False
 
 
-async def send_msg(bot: Bot, text: str) -> bool:
-    """Send message to Telegram with retry and exponential backoff."""
+async def send_msg(bot: Bot, text: str, silent: Optional[bool] = None):
+    """Send message to Telegram with retry and exponential backoff. Returns the Message (truthy)
+    or None. `silent` defaults to the quiet-hours rule."""
+    if silent is None:
+        silent = is_quiet(utcnow())
     for i in range(TELEGRAM_RETRIES):
         try:
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode="Markdown")
-            logging.info(f"Telegram message sent: {text[:50]}...")
-            return True
+            msg = await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode="Markdown",
+                                         disable_notification=silent)
+            logging.info(f"Telegram message sent{' (silent)' if silent else ''}: {text[:50]}...")
+            return msg
         except Exception as e:
             logging.warning(f"Telegram send failed (attempt {i+1}/{TELEGRAM_RETRIES}): {e}")
             await asyncio.sleep(2**i)
     logging.error(f"Failed to send Telegram message after {TELEGRAM_RETRIES} attempts")
-    return False
+    return None
+
+
+async def edit_msg(bot: Bot, message_id: int, text: str) -> str:
+    """Edit a message sent by the bot (edits never notify). Returns "ok", "not_modified",
+    "gone" (deleted / not editable any more) or "error" (transient)."""
+    try:
+        await bot.edit_message_text(chat_id=TELEGRAM_CHAT_ID, message_id=message_id, text=text,
+                                    parse_mode="Markdown")
+        logging.info(f"Telegram message {message_id} edited")
+        return "ok"
+    except BadRequest as e:
+        err = str(e).lower()
+        if "not modified" in err:
+            return "not_modified"
+        if "not found" in err or "can't be edited" in err:
+            return "gone"
+        logging.warning(f"Telegram edit failed: {e}")
+        return "error"
+    except Exception as e:
+        logging.warning(f"Telegram edit failed: {e}")
+        return "error"
 
 
 async def push_status_to_mango(client: httpx.AsyncClient, stats: StatsManager):
@@ -543,9 +610,11 @@ async def push_status_to_mango(client: httpx.AsyncClient, stats: StatsManager):
         logging.warning(f"Mango webhook push failed: {e}")
 
 
-async def send_due_reports(bot: Bot, stats: StatsManager, now: datetime):
+async def send_due_reports(bot: Bot, stats: StatsManager, now: datetime,
+                           dtek: Optional[DtekWatcher] = None):
     for period in stats.due_reports(now):
-        if not await send_msg(bot, create_report(period)):
+        planned = dtek.planned(period.first_day) if dtek and period.kind == "daily" else None
+        if not await send_msg(bot, create_report(period, planned), silent=False):
             break  # keep it pending, retry on the next iteration
         stats.pending.remove(period)
         stats.save()
@@ -608,12 +677,24 @@ async def main():
     if mango_client:
         await push_status_to_mango(mango_client, stats)
 
+    dtek, dtek_task = None, None
+    if DTEK_SOURCE_URL:
+        async def dtek_send(text: str):
+            msg = await send_msg(bot, text)
+            return msg.message_id if msg else None
+
+        dtek = DtekWatcher(DTEK_SOURCE_URL, DTEK_GROUP, DTEK_STATE_FILE, TZ,
+                           send=dtek_send, edit=lambda mid, text: edit_msg(bot, mid, text),
+                           poll_interval=DTEK_POLL_INTERVAL, stale_hours=DTEK_STALE_HOURS)
+        dtek_task = asyncio.create_task(dtek.run(shutdown_event))
+        logging.info(f"DTEK schedule enabled for {DTEK_GROUP}")
+
     power_db, net_db = Debouncer(), Debouncer()
     iteration_count = 0
 
     while not shutdown_event.is_set():
         try:
-            await send_due_reports(bot, stats, utcnow())
+            await send_due_reports(bot, stats, utcnow(), dtek)
 
             new_i, new_p = await check_connectivity()
             now = utcnow()
@@ -676,6 +757,8 @@ async def main():
 
     stats.advance(utcnow())
     stats.save()
+    if dtek_task:
+        await dtek_task
     if mango_client:
         await mango_client.aclose()
     await send_msg(bot, "🛑 *Моніторинг зупинено*")
