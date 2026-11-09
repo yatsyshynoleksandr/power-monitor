@@ -13,7 +13,7 @@ RUN mkdir -p /opt/folder-monitor
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY power_monitor.py .
+COPY power_monitor.py dtek.py ./
 
 ENV TIMEZONE=Europe/Kyiv \
     HEARTBEAT_FILE=/tmp/power_monitor.heartbeat

@@ -1,3 +1,12 @@
+### [v1.3.0](https://github.com/yatsyshynoleksandr/power-monitor/tree/v1.3.0) (2026-11-09)
+
+*Add :*
+
+- DTEK outage schedule for one queue (`DTEK_SOURCE_URL`, `DTEK_GROUP`): one message per date,
+  silently edited on every change with an appended history (time + diff); old messages are kept
+- daily report: planned outage time ("🗓 За графіком без світла") next to the actual one
+- quiet hours (`QUIET_HOURS`, default `22-8`): messages without sound; the 09:00 report always rings
+
 ### [v1.2.1](https://github.com/yatsyshynoleksandr/power-monitor/tree/v1.2.1) (2026-11-09)
 
 *Security :*
