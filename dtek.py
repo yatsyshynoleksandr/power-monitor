@@ -5,6 +5,8 @@ Source: a JSON mirror of dtek-krem.com.ua (https://github.com/Baskerville42/outa
 data/kyiv-region.json), polled with ETag. For every date one message is published; when the
 schedule for that date changes, the message is edited silently: the "current" block is replaced
 and a line with the time and the diff is appended to its history. Messages are never deleted.
+Optionally the messages of today and later are pinned (silently) and unpinned once their day is
+over, so in the evening both today's and tomorrow's schedules are on top of the chat.
 
 Schedule model: 48 half-hour slots per day, each "0" (power), "1" (no power) or "2" (maybe).
 """
@@ -116,19 +118,22 @@ def diff_text(old: str, new: str) -> str:
 
 class DayState:
     def __init__(self, slots: str, message_id: Optional[int] = None,
-                 history: Optional[list] = None, last_text: Optional[str] = None):
+                 history: Optional[list] = None, last_text: Optional[str] = None,
+                 pinned: bool = False):
         self.slots = slots
         self.message_id = message_id
         self.history = history or []
         self.last_text = last_text
+        self.pinned = pinned  # message_id is pinned by the bot
 
     def to_dict(self) -> dict:
         return {"slots": self.slots, "message_id": self.message_id,
-                "history": self.history, "last_text": self.last_text}
+                "history": self.history, "last_text": self.last_text, "pinned": self.pinned}
 
     @classmethod
     def from_dict(cls, d: dict) -> "DayState":
-        return cls(d["slots"], d.get("message_id"), d.get("history", []), d.get("last_text"))
+        return cls(d["slots"], d.get("message_id"), d.get("history", []), d.get("last_text"),
+                   d.get("pinned", False))
 
 
 class DtekWatcher:
@@ -137,6 +142,8 @@ class DtekWatcher:
     def __init__(self, url: str, group: str, state_file: str, tz,
                  send: Callable[[str], Awaitable[Optional[int]]],
                  edit: Callable[[int, str], Awaitable[str]],
+                 pin: Optional[Callable[[int], Awaitable[str]]] = None,
+                 unpin: Optional[Callable[[int], Awaitable[str]]] = None,
                  poll_interval: int = 300, stale_hours: float = 2.0,
                  now: Callable[[], datetime] = lambda: datetime.now(UTC)):
         self.url = url
@@ -145,6 +152,9 @@ class DtekWatcher:
         self.tz = tz
         self.send = send            # async (text) -> message_id | None
         self.edit = edit            # async (message_id, text) -> "ok" | "not_modified" | "gone" | "error"
+        self.pin = pin              # async (message_id) -> "ok" | "gone" | "error"; None = no pinning
+        self.unpin = unpin          # async (message_id) -> "ok" | "gone" | "error"
+        self._pin_retry_at: dict = {}  # message_id -> earliest next attempt after a failure
         self.poll_interval = poll_interval
         self.stale_hours = stale_hours
         self.now = now
@@ -275,26 +285,53 @@ class DtekWatcher:
 
     async def sync_messages(self):
         """Make every current/future published message match its rendered text (also retries
-        failed edits and refreshes the "stale data" note)."""
+        failed edits and refreshes the "stale data" note), pin current/future messages and unpin
+        the ones whose day is over."""
         today = self.today()
         for key, day in sorted(self.days.items()):
             d = date.fromisoformat(key)
-            if d < today or not day.history:
+            if d < today:
+                await self._unpin(day)
                 continue
-            text = self.render(d, day)
-            if text == day.last_text and day.message_id is not None:
+            if not day.history:
                 continue
-            if day.message_id is not None:
-                result = await self.edit(day.message_id, text)
-                if result in ("ok", "not_modified"):
-                    day.last_text = text
-                    continue
-                if result == "error":
-                    continue  # transient, retry on the next poll
-                logging.warning(f"DTEK: message {day.message_id} for {key} is gone, sending a new one")
-            mid = await self.send(text)
-            if mid is not None:
-                day.message_id, day.last_text = mid, text
+            await self._update_text(key, d, day)
+            await self._pin(day)
+
+    async def _update_text(self, key: str, d: date, day: DayState):
+        text = self.render(d, day)
+        if text == day.last_text and day.message_id is not None:
+            return
+        if day.message_id is not None:
+            result = await self.edit(day.message_id, text)
+            if result in ("ok", "not_modified"):
+                day.last_text = text
+                return
+            if result == "error":
+                return  # transient, retry on the next poll
+            logging.warning(f"DTEK: message {day.message_id} for {key} is gone, sending a new one")
+        mid = await self.send(text)
+        if mid is not None:
+            day.message_id, day.last_text, day.pinned = mid, text, False
+
+    async def _pin(self, day: DayState):
+        if not self.pin or day.message_id is None or day.pinned:
+            return
+        retry_at = self._pin_retry_at.get(day.message_id)
+        if retry_at and self.now() < retry_at:
+            return
+        result = await self.pin(day.message_id)
+        if result == "ok":
+            day.pinned = True
+            self._pin_retry_at.pop(day.message_id, None)
+        else:  # e.g. the bot lacks the right to pin: don't retry on every poll
+            self._pin_retry_at[day.message_id] = self.now() + timedelta(hours=1)
+
+    async def _unpin(self, day: DayState):
+        if not day.pinned or day.message_id is None or not self.unpin:
+            return
+        if await self.unpin(day.message_id) in ("ok", "gone"):
+            day.pinned = False
 
     def _prune(self, today: date):
         cutoff = today - timedelta(days=KEEP_DAYS)

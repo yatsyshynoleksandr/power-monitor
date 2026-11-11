@@ -1,3 +1,14 @@
+### [v1.4.0](https://github.com/yatsyshynoleksandr/power-monitor/tree/v1.4.0) (2026-11-11)
+
+*Add :*
+
+- pin the DTEK schedule messages of today and later (silently); a day's message is unpinned after
+  its midnight, so in the evening both today's and tomorrow's schedules are pinned (`DTEK_PIN`)
+
+*Change :*
+
+- log timestamps in `TIMEZONE` (Europe/Kyiv) instead of the container's UTC
+
 ### [v1.3.0](https://github.com/yatsyshynoleksandr/power-monitor/tree/v1.3.0) (2026-11-09)
 
 *Add :*

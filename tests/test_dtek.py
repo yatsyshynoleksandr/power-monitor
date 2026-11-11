@@ -36,6 +36,24 @@ class FakeTelegram:
         self.sent = []
         self.edits = []
         self.edit_result = None
+        self.pinned = set()
+        self.pin_calls = 0
+        self.pin_result = None
+
+    async def pin(self, mid):
+        self.pin_calls += 1
+        if self.pin_result:
+            return self.pin_result
+        if mid not in self.messages:
+            return "gone"
+        self.pinned.add(mid)
+        return "ok"
+
+    async def unpin(self, mid):
+        if mid not in self.pinned:
+            return "gone"
+        self.pinned.discard(mid)
+        return "ok"
 
     async def send(self, text):
         self.next_id += 1
@@ -83,6 +101,79 @@ class Parsing(unittest.TestCase):
         self.assertEqual(dtek.fmt_minutes(450), "7г 30хв")
         self.assertEqual(dtek.fmt_minutes(60), "1г")
         self.assertEqual(dtek.fmt_minutes(0), "0хв")
+
+
+class Pinning(unittest.TestCase):
+    """Variant B: today's and tomorrow's schedules are pinned; a day is unpinned after midnight."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state = os.path.join(self.tmp.name, "dtek_state.json")
+        self.tg = FakeTelegram()
+        self.now = datetime(2026, 11, 9, 8, 0, tzinfo=UTC)  # 10:00 Kyiv
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def watcher(self, pin=True):
+        return dtek.DtekWatcher("http://x", "2.1", self.state, TZ, self.tg.send, self.tg.edit,
+                                pin=self.tg.pin if pin else None, unpin=self.tg.unpin,
+                                now=lambda: self.now)
+
+    def test_today_and_tomorrow_pinned_then_yesterday_unpinned(self):
+        w = self.watcher()
+        today, tomorrow = date(2026, 11, 9), date(2026, 11, 10)
+        asyncio.run(w.apply(doc({today: hours(h4="no")}, update="09.11.2026 07:56")))
+        m_today = self.tg.sent[0]
+        self.assertEqual(self.tg.pinned, {m_today})
+
+        self.now = datetime(2026, 11, 9, 18, 30, tzinfo=UTC)  # 20:30, tomorrow published
+        asyncio.run(w.apply(doc({today: hours(h4="no"), tomorrow: hours(h10="no")}, update="09.11.2026 20:04")))
+        m_tomorrow = self.tg.sent[1]
+        self.assertEqual(self.tg.pinned, {m_today, m_tomorrow})  # both in the evening
+
+        self.now = datetime(2026, 11, 9, 22, 5, tzinfo=UTC)  # 00:05 on 10.11
+        w2 = self.watcher()  # also across a restart
+        asyncio.run(w2.sync_messages())
+        self.assertEqual(self.tg.pinned, {m_tomorrow})
+        self.assertFalse(w2.days["2026-11-09"].pinned)
+        self.assertTrue(w2.days["2026-11-10"].pinned)
+
+    def test_state_from_v130_gets_pinned(self):
+        w = self.watcher(pin=False)
+        asyncio.run(w.apply(doc({date(2026, 11, 9): hours(h4="no")})))
+        self.assertEqual(self.tg.pinned, set())
+        w2 = self.watcher()
+        asyncio.run(w2.sync_messages())
+        self.assertEqual(self.tg.pinned, {self.tg.sent[0]})
+
+    def test_pin_failure_is_retried_hourly_not_every_poll(self):
+        self.tg.pin_result = "error"
+        w = self.watcher()
+        asyncio.run(w.apply(doc({date(2026, 11, 9): hours(h4="no")})))
+        asyncio.run(w.sync_messages())
+        self.assertEqual(self.tg.pin_calls, 1)
+        self.tg.pin_result = None
+        self.now += timedelta(minutes=61)
+        asyncio.run(w.sync_messages())
+        self.assertEqual(self.tg.pinned, {self.tg.sent[0]})
+
+    def test_replaced_message_is_pinned(self):
+        w = self.watcher()
+        d = date(2026, 11, 9)
+        asyncio.run(w.apply(doc({d: hours(h4="no")})))
+        old = self.tg.sent[0]
+        del self.tg.messages[old]
+        self.tg.pinned.discard(old)
+        asyncio.run(w.apply(doc({d: hours(h4="no", h5="no")}, update="09.11.2026 11:00")))
+        self.assertEqual(self.tg.pinned, {self.tg.sent[1]})
+
+    def test_pinning_disabled_still_unpins_old(self):
+        w = self.watcher()
+        asyncio.run(w.apply(doc({date(2026, 11, 9): hours(h4="no")})))
+        self.now = datetime(2026, 11, 9, 22, 5, tzinfo=UTC)
+        asyncio.run(self.watcher(pin=False).sync_messages())
+        self.assertEqual(self.tg.pinned, set())
 
 
 class Watcher(unittest.TestCase):
