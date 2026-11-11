@@ -214,6 +214,10 @@ class Logging(unittest.TestCase):
                 pm.setup_logging()
                 self.assertEqual(logging.getLogger("httpx").getEffectiveLevel(), logging.WARNING)
                 self.assertEqual(logging.getLogger("httpcore").getEffectiveLevel(), logging.WARNING)
+                fmt = root.handlers[-1].formatter
+                rec = logging.makeLogRecord({"msg": "x"})
+                rec.created = datetime(2026, 7, 1, 6, 0, tzinfo=UTC).timestamp()
+                self.assertTrue(fmt.format(rec).startswith("2026-07-01 09:00:00"))  # Kyiv, UTC+3
             finally:
                 for h in root.handlers[:]:
                     if h not in before:

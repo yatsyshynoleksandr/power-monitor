@@ -90,6 +90,8 @@ DTEK_GROUP = normalize_group(os.environ.get("DTEK_GROUP", "2.1"))
 DTEK_POLL_INTERVAL = int(os.environ.get("DTEK_POLL_INTERVAL", "300"))
 DTEK_STALE_HOURS = float(os.environ.get("DTEK_STALE_HOURS", "2"))
 DTEK_STATE_FILE = os.environ.get("DTEK_STATE_FILE", str(Path(STATS_FILE).with_name("dtek_state.json")))
+# Pin the schedule messages of today and later (unpinned when their day is over).
+DTEK_PIN = os.environ.get("DTEK_PIN", "true").strip().lower() in ("1", "true", "yes", "on")
 # ==========================================
 
 UTC = timezone.utc
@@ -500,6 +502,8 @@ def setup_logging():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    # Timestamps in TIMEZONE (as in the Telegram messages), not in the container's UTC.
+    fmt.converter = lambda ts: datetime.fromtimestamp(ts, TZ).timetuple()
     try:
         Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(LOG_FILE, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT)
@@ -610,6 +614,28 @@ async def push_status_to_mango(client: httpx.AsyncClient, stats: StatsManager):
         logging.warning(f"Mango webhook push failed: {e}")
 
 
+async def pin_msg(bot: Bot, message_id: int) -> str:
+    """Pin silently. Returns "ok", "gone" (message not found) or "error" (e.g. no right to pin)."""
+    try:
+        await bot.pin_chat_message(chat_id=TELEGRAM_CHAT_ID, message_id=message_id,
+                                   disable_notification=True)
+        logging.info(f"Telegram message {message_id} pinned")
+        return "ok"
+    except Exception as e:
+        logging.warning(f"Telegram pin of {message_id} failed: {e}")
+        return "gone" if "not found" in str(e).lower() else "error"
+
+
+async def unpin_msg(bot: Bot, message_id: int) -> str:
+    try:
+        await bot.unpin_chat_message(chat_id=TELEGRAM_CHAT_ID, message_id=message_id)
+        logging.info(f"Telegram message {message_id} unpinned")
+        return "ok"
+    except Exception as e:
+        logging.warning(f"Telegram unpin of {message_id} failed: {e}")
+        return "gone" if "not found" in str(e).lower() else "error"
+
+
 async def send_due_reports(bot: Bot, stats: StatsManager, now: datetime,
                            dtek: Optional[DtekWatcher] = None):
     for period in stats.due_reports(now):
@@ -685,6 +711,8 @@ async def main():
 
         dtek = DtekWatcher(DTEK_SOURCE_URL, DTEK_GROUP, DTEK_STATE_FILE, TZ,
                            send=dtek_send, edit=lambda mid, text: edit_msg(bot, mid, text),
+                           pin=(lambda mid: pin_msg(bot, mid)) if DTEK_PIN else None,
+                           unpin=lambda mid: unpin_msg(bot, mid),
                            poll_interval=DTEK_POLL_INTERVAL, stale_hours=DTEK_STALE_HOURS)
         dtek_task = asyncio.create_task(dtek.run(shutdown_event))
         logging.info(f"DTEK schedule enabled for {DTEK_GROUP}")
